@@ -1,0 +1,31 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Entornos virtuales
+venv/
+.env
+
+# Archivos de logs
+*.log
+
+# Carpetas de datos temporales
+*.csv
+*.xlsx
+
+# Carpeta .pytest_cache si usas pytest
+.pytest_cache/
+
+# Archivos de sistema
+.DS_Store
+Thumbs.db
+
+# Docker
+*.dockerignore
+Dockerfile
+
+# Otros
+*.egg-info/
+dist/
+build/
