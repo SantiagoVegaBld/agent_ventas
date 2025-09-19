@@ -1,117 +1,119 @@
 # src/agent/core_agent.py
 
+import sqlite3
+import pandas as pd
+import plotly.express as px
 from langchain import LLMChain, PromptTemplate
-from langchain.agents import AgentExecutor
-from langchain.tools import BaseTool
 from langchain.llms import OpenAI
-import re
+import os
 
-# Herramientas MCP simuladas (deberían ser conectores reales)
-class SQLTool(BaseTool):
-    name = "sql"
-    description = "Ejecuta consultas SQL seguras sobre la base de datos de ventas."
+class SQLConnector:
+    """Conector simple a SQLite para ejecutar consultas SQL y devolver DataFrame."""
+    def __init__(self, db_path="ventas.db"):
+        self.db_path = db_path
 
-    def _run(self, query: str):
-        # Validación simple: solo SELECT y limitación
-        if not query.strip().lower().startswith("select"):
-            return "Error: Solo consultas SELECT están permitidas."
-        if "drop" in query.lower() or "delete" in query.lower():
-            return "Error: Consultas destructivas no permitidas."
-        # Aquí se llamaría al conector MCP real para ejecutar la consulta
-        # Simulación de resultado:
-        return f"Ejecutando SQL: {query}"
-
-    async def _arun(self, query: str):
-        return self._run(query)
-
-class PlotTool(BaseTool):
-    name = "plot"
-    description = "Genera gráficos a partir de datos."
-
-    def _run(self, data):
-        # Aquí se generaría un gráfico usando matplotlib, plotly, etc.
-        return f"Gráfico generado con datos: {data}"
-
-    async def _arun(self, data):
-        return self._run(data)
-
-class FileTool(BaseTool):
-    name = "file"
-    description = "Guarda datos en archivos CSV o Excel."
-
-    def _run(self, data):
-        # Aquí se guardaría el archivo y se devolvería la ruta
-        return f"Archivo guardado con datos: {data}"
-
-    async def _arun(self, data):
-        return self._run(data)
-
-# Prompt para traducir lenguaje natural a SQL
-PROMPT = PromptTemplate(
-    input_variables=["question"],
-    template=(
-        "Eres un asistente que traduce preguntas en lenguaje natural sobre ventas "
-        "a consultas SQL seguras para la tabla 'ventas'. Solo genera consultas SELECT. "
-        "Pregunta: {question}\nSQL:"
-    )
-)
+    def execute_query(self, query: str) -> pd.DataFrame:
+        # Abrir conexión SQLite y ejecutar consulta dentro de contexto para cierre automático
+        with sqlite3.connect(self.db_path) as conn:
+            df = pd.read_sql_query(query, conn)
+        return df
 
 class CoreAgent:
-    def __init__(self):
+    def __init__(self, db_path="ventas.db"):
+        # Configuración del modelo LLM y prompt para traducción NL -> SQL
         self.llm = OpenAI(temperature=0)
-        self.sql_tool = SQLTool()
-        self.plot_tool = PlotTool()
-        self.file_tool = FileTool()
-        self.chain = LLMChain(llm=self.llm, prompt=PROMPT)
+        self.prompt = PromptTemplate(
+            input_variables=["question"],
+            template=(
+                "Eres un asistente que traduce preguntas en lenguaje natural sobre ventas "
+                "a consultas SQL seguras para la tabla 'ventas'. Solo genera consultas SELECT.\n"
+                "Pregunta: {question}\nSQL:"
+            )
+        )
+        self.chain = LLMChain(llm=self.llm, prompt=self.prompt)
+        self.sql_connector = SQLConnector(db_path)
 
     def nl_to_sql(self, question: str) -> str:
+        """
+        Traduce la pregunta en lenguaje natural a una consulta SQL usando el LLM.
+        Luego sanitiza la consulta para seguridad.
+        """
         sql_query = self.chain.run(question=question)
         sql_query = self._sanitize_sql(sql_query)
         return sql_query
 
     def _sanitize_sql(self, sql: str) -> str:
-        # Validación básica para seguridad
-        sql_lower = sql.lower()
+        """
+        Valida que la consulta SQL sea segura:
+        - Solo permite consultas SELECT.
+        - No permite comandos peligrosos (DROP, DELETE, UPDATE, INSERT, ALTER).
+        - Agrega LIMIT 100 si no está presente para limitar resultados.
+        """
+        sql_lower = sql.strip().lower()
         if not sql_lower.startswith("select"):
             raise ValueError("Solo se permiten consultas SELECT.")
-        if any(word in sql_lower for word in ["drop", "delete", "update", "insert"]):
+        forbidden = ["drop", "delete", "update", "insert", "alter"]
+        if any(word in sql_lower for word in forbidden):
             raise ValueError("Consulta SQL contiene comandos no permitidos.")
-        # Limitar resultados con LIMIT si no existe
         if "limit" not in sql_lower:
             sql += " LIMIT 100"
         return sql
 
-    def execute_sql(self, sql: str):
-        return self.sql_tool._run(sql)
+    def execute_sql(self, sql: str) -> pd.DataFrame:
+        """Ejecuta la consulta SQL usando el conector y devuelve un DataFrame."""
+        return self.sql_connector.execute_query(sql)
 
-    def generate_plot(self, data):
-        return self.plot_tool._run(data)
+    def generate_plot(self, df: pd.DataFrame, question: str) -> str:
+        """
+        Genera un gráfico de barras sencillo:
+        - Busca la primera columna como eje X.
+        - Busca la primera columna numérica como eje Y.
+        - Guarda el gráfico como archivo HTML con nombre único.
+        """
+        if df.empty:
+            return "No hay datos para graficar."
 
-    def save_file(self, data):
-        return self.file_tool._run(data)
+        numeric_cols = df.select_dtypes(include='number').columns
+        if len(numeric_cols) == 0:
+            return "No hay columnas numéricas para graficar."
+
+        x_col = df.columns[0]
+        y_col = numeric_cols[0]
+
+        fig = px.bar(df, x=x_col, y=y_col, title=question)
+        graph_path = f"output/graph_{abs(hash(question))}.html"  # Nombre único para evitar sobrescribir
+        os.makedirs(os.path.dirname(graph_path), exist_ok=True)
+        fig.write_html(graph_path)
+        return f"Gráfico generado y guardado en {graph_path}"
+
+    def save_file(self, df: pd.DataFrame, filename="output/data.csv") -> str:
+        """Guarda el DataFrame en un archivo CSV (puedes extender a Excel si quieres)."""
+        os.makedirs(os.path.dirname(filename), exist_ok=True)
+        df.to_csv(filename, index=False)
+        return f"Archivo guardado en {filename}"
 
     def handle_question(self, question: str):
+        """
+        Flujo principal para manejar preguntas:
+        - Traduce NL a SQL.
+        - Ejecuta consulta.
+        - Decide si genera gráfico, guarda archivo o devuelve tabla según keywords.
+        """
         try:
             sql = self.nl_to_sql(question)
-            result = self.execute_sql(sql)
-            # Simplificación: decidir acción por palabras clave en la pregunta
-            if "gráfico" in question.lower() or "grafico" in question.lower():
-                return self.generate_plot(result)
-            elif "archivo" in question.lower() or "csv" in question.lower() or "excel" in question.lower():
-                return self.save_file(result)
+            df = self.execute_sql(sql)
+
+            question_lower = question.lower()
+            if any(keyword in question_lower for keyword in ["gráfico", "grafico", "gráficos", "grafica"]):
+                return self.generate_plot(df, question)
+            elif any(keyword in question_lower for keyword in ["archivo", "csv", "excel"]):
+                # Aquí podrías mejorar para detectar nombre de archivo dinámico
+                filename = "output/ventas.csv"
+                return self.save_file(df, filename)
             else:
-                return result
+                # Mostrar tabla simple (primeras 10 filas)
+                if df.empty:
+                    return "No se encontraron resultados."
+                return df.head(10).to_string(index=False)
         except Exception as e:
             return f"Error: {e}"
-
-# Ejemplo rápido de uso
-if __name__ == "__main__":
-    agent = CoreAgent()
-    q1 = "Top 5 productos más vendidos en Medellín"
-    print(agent.handle_question(q1))
-
-    q2 = "Guarda las ventas por vendedor en un archivo CSV"
-    print(agent.handle_question(q2))
-
-    q3 = "Quién fue el vendedor con más ventas en Bogotá"
-    print(agent.handle_question(q3))
